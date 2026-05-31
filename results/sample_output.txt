@@ -1,0 +1,19 @@
+Resultados de simulación M/M/1
+Réplicas ejecutadas: 214
+Réplicas recomendadas (95% CI, error relativo 5.0%): 214
+
+Promedio de tiempos por cajero:
+  Cajero 1: atención 2.52 min, espera 10.56 min, usuarios 34123
+  Cajero 2: atención 2.49 min, espera 10.91 min, usuarios 34374
+  Cajero 3: atención 2.50 min, espera 9.96 min, usuarios 34098
+  Cajero 4: atención 2.49 min, espera 10.48 min, usuarios 34484
+
+Cajero con menor tiempo promedio de atención: Cajero 2 (2.49 min)
+Cajero con mayor tiempo promedio de atención: Cajero 1 (2.52 min)
+
+Promedio de usuarios por tipo (por cajero): pagos 18909.50, retiros 15360.25
+Total de usuarios: pagos 75638, retiros 61441
+
+Tiempo promedio de espera global: 10.48 min (umbral 5 min)
+Conclusión: se recomienda crear un nuevo cajero.
+Cajeros exclusivos recomendados: pagos 3, retiros 2
