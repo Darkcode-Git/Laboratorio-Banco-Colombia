@@ -26,7 +26,7 @@ Además incluye:
 ## Ejecución
 
 ```bash
-python /tmp/workspace/Darkcode-Git/Laboratorio-Banco-Colombia/bank_simulation.py
+python bank_simulation.py
 ```
 
 Salida principal:

@@ -32,6 +32,19 @@ class BankSimulationTests(unittest.TestCase):
                 self.assertIn("metricas_globales", data)
                 self.assertEqual(len(data["punto_3_total_usuarios_por_tipo_por_replica"]), 10)
 
+    def test_experiment_handles_larger_replica_count(self) -> None:
+        result = run_experiment(replicas=30, horizon_minutes=120, base_seed=456)
+        for data in result["escenarios"].values():
+            self.assertEqual(len(data["punto_3_total_usuarios_por_tipo_por_replica"]), 30)
+            ci_low, ci_high = data["metricas_globales"]["ic95_espera_promedio"]
+            self.assertLessEqual(ci_low, ci_high)
+            self.assertGreaterEqual(data["metricas_globales"]["espera_promedio"], 0.0)
+
+    def test_experiment_production_like_parameters(self) -> None:
+        result = run_experiment(replicas=60, horizon_minutes=480, base_seed=999)
+        self.assertIn(result["configuracion_optima"], result["escenarios"])
+        self.assertIsInstance(result["necesita_nuevo_cajero"], bool)
+
 
 if __name__ == "__main__":
     unittest.main()

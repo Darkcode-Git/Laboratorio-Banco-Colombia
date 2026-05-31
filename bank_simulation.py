@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -32,6 +33,41 @@ class Scenario:
     name: str
     cashier_capabilities: Tuple[Optional[Action], ...]
 
+
+NEW_CASHIER_IMPROVEMENT_THRESHOLD = 0.90
+
+T_CRITICAL_95 = {
+    1: 12.706,
+    2: 4.303,
+    3: 3.182,
+    4: 2.776,
+    5: 2.571,
+    6: 2.447,
+    7: 2.365,
+    8: 2.306,
+    9: 2.262,
+    10: 2.228,
+    11: 2.201,
+    12: 2.179,
+    13: 2.160,
+    14: 2.145,
+    15: 2.131,
+    16: 2.120,
+    17: 2.110,
+    18: 2.101,
+    19: 2.093,
+    20: 2.086,
+    21: 2.080,
+    22: 2.074,
+    23: 2.069,
+    24: 2.064,
+    25: 2.060,
+    26: 2.056,
+    27: 2.052,
+    28: 2.048,
+    29: 2.045,
+    30: 2.042,
+}
 
 SCENARIOS: Tuple[Scenario, ...] = (
     Scenario(name="3_cajas_mixtas", cashier_capabilities=(None, None, None)),
@@ -198,7 +234,9 @@ def simulate_replica(
             avg_service = stats.total_service / stats.customers
             avg_system = stats.total_system / stats.customers
             lambda_hat = stats.customers / horizon_minutes
-            utilization = min(stats.total_service / horizon_minutes, 1.0)
+            # El servicio puede terminar después del horizonte de llegadas, por eso se acota a 1.0.
+            utilization_raw = stats.total_service / horizon_minutes
+            utilization = min(utilization_raw, 1.0)
             l = lambda_hat * avg_system
             lq = lambda_hat * avg_wait
         else:
@@ -237,7 +275,10 @@ def confidence_interval_95(values: Iterable[float]) -> Tuple[float, float]:
     if len(values_list) == 1:
         return (values_list[0], values_list[0])
     m = mean(values_list)
-    margin = 1.96 * stdev(values_list) / sqrt(len(values_list))
+    degrees_freedom = len(values_list) - 1
+    # Para n grandes (gl > 30), t converge al valor z≈1.96 en un IC bilateral del 95%.
+    critical_value = T_CRITICAL_95.get(degrees_freedom, 1.96)
+    margin = critical_value * stdev(values_list) / sqrt(len(values_list))
     return (m - margin, m + margin)
 
 
@@ -258,10 +299,10 @@ def _aggregate_type_average(replica_results: List[ReplicaResult]) -> Dict[UserTy
 def _replica_min_by_type(replica_results: List[ReplicaResult]) -> Dict[UserType, Dict[str, int]]:
     min_data: Dict[UserType, Dict[str, int]] = {}
     for user_type in USER_TYPES:
-        min_replica_index, min_count = min(
+        min_replica_index, min_result = min(
             enumerate(replica_results, start=1), key=lambda item: item[1].type_counts[user_type]
         )
-        min_data[user_type] = {"replica": min_replica_index, "usuarios": min_count.type_counts[user_type]}
+        min_data[user_type] = {"replica": min_replica_index, "usuarios": min_result.type_counts[user_type]}
     return min_data
 
 
@@ -284,15 +325,15 @@ def run_experiment(replicas: int = 600, horizon_minutes: float = 480.0, base_see
         avg_wait_ci = confidence_interval_95(avg_waits)
 
         service_by_cashier = _aggregate_cashier_service_means(results)
-        best_cashier = min(service_by_cashier, key=service_by_cashier.get)
-        worst_cashier = max(service_by_cashier, key=service_by_cashier.get)
+        quickest_service_cashier = min(service_by_cashier, key=service_by_cashier.get)
+        slowest_service_cashier = max(service_by_cashier, key=service_by_cashier.get)
 
         scenario_outputs[scenario.name] = {
             "rho_por_cajero": rho,
             "punto_1_cajeros": {
                 "tiempo_promedio_servicio_por_cajero": service_by_cashier,
-                "cajero_menor_tiempo": best_cashier,
-                "cajero_mayor_tiempo": worst_cashier,
+                "cajero_menor_tiempo": quickest_service_cashier,
+                "cajero_mayor_tiempo": slowest_service_cashier,
             },
             "punto_2_promedio_usuarios_por_tipo": _aggregate_type_average(results),
             "punto_3_total_usuarios_por_tipo_por_replica": [result.type_counts for result in results],
@@ -312,7 +353,7 @@ def run_experiment(replicas: int = 600, horizon_minutes: float = 480.0, base_see
         for name in ["3_cajas_mixtas", "1_retiro_2_pagos", "2_retiros_1_pago"]
     )
     wait_4_cashiers = scenario_outputs["4_cajas_3_retiros_1_pago"]["metricas_globales"]["espera_promedio"]
-    needs_new_cashier = wait_4_cashiers < (wait_3_cashiers * 0.9)
+    needs_new_cashier = wait_4_cashiers < (wait_3_cashiers * NEW_CASHIER_IMPROVEMENT_THRESHOLD)
 
     optimal_scenario = min(
         scenario_outputs,
@@ -334,16 +375,18 @@ def run_experiment(replicas: int = 600, horizon_minutes: float = 480.0, base_see
 def _plot_wait_comparison(results: Dict[str, object]) -> None:
     try:
         import matplotlib.pyplot as plt  # type: ignore
-    except Exception:
+    except ImportError:
         return
 
     escenarios = list(results["escenarios"].keys())
     esperas = [results["escenarios"][name]["metricas_globales"]["espera_promedio"] for name in escenarios]
 
     fig, ax = plt.subplots(figsize=(10, 4))
-    ax.bar(escenarios, esperas)
+    x_positions = list(range(len(escenarios)))
+    ax.bar(x_positions, esperas)
     ax.set_title("Comparación de espera promedio por escenario")
     ax.set_ylabel("Minutos")
+    ax.set_xticks(x_positions)
     ax.set_xticklabels(escenarios, rotation=20, ha="right")
     fig.tight_layout()
     plt.savefig("comparacion_esperas.png", dpi=150)
