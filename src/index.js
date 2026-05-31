@@ -27,6 +27,7 @@ const KEY_MAP = {
 };
 
 const Z_SCORE_95_CI = 1.96;
+const MIN_RANDOM = 1e-10;
 
 function usage() {
   return `
@@ -61,7 +62,7 @@ function createRng(seed) {
 }
 
 function exponential(rate, rand) {
-  const u = Math.max(rand(), Number.EPSILON);
+  const u = Math.max(rand(), MIN_RANDOM);
   return -Math.log(u) / rate;
 }
 
@@ -253,7 +254,8 @@ function simulateBank(config) {
     aggregated,
     meanWaitSamples,
     replicationsExecuted: meanWaitSamples.length,
-    requiredReplications: capped ? required : evaluation.required,
+    calculatedRequiredReplications: evaluation.required,
+    appliedReplications: capped ? required : evaluation.required,
     capped,
   };
 }
@@ -343,10 +345,13 @@ function main() {
 
     console.log("Resultados de simulación M/M/1");
     console.log(`Réplicas ejecutadas: ${results.replicationsExecuted}`);
+    const replicationsLabel = results.capped
+      ? `${results.calculatedRequiredReplications} (limitado a ${results.appliedReplications})`
+      : `${results.calculatedRequiredReplications}`;
     console.log(
       `Réplicas recomendadas (95% CI, error relativo ${(
         config.relativeError * 100
-      ).toFixed(1)}%): ${results.requiredReplications}${results.capped ? " (limitado)" : ""}`
+      ).toFixed(1)}%): ${replicationsLabel}`
     );
     console.log("");
     console.log("Promedio de tiempos por cajero:");
