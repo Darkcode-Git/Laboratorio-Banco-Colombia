@@ -62,7 +62,7 @@ function createRng(seed) {
 
 function exponential(rate, rand) {
   const u = Math.max(rand(), Number.EPSILON);
-  return -Math.log(1 - u) / rate;
+  return -Math.log(u) / rate;
 }
 
 function parseArgs(argv) {
@@ -262,6 +262,38 @@ function formatMinutes(value) {
   return `${value.toFixed(2)} min`;
 }
 
+function recommendExclusiveTellers(totalTellers, totalPayments, totalWithdrawals) {
+  if (totalTellers <= 0) {
+    return { paymentTellers: 0, withdrawalTellers: 0 };
+  }
+
+  const totalCustomers = totalPayments + totalWithdrawals;
+  const paymentShare = totalCustomers === 0 ? 0.5 : totalPayments / totalCustomers;
+  let paymentTellers = Math.round(totalTellers * paymentShare);
+  let withdrawalTellers = totalTellers - paymentTellers;
+
+  if (totalTellers === 1) {
+    if (totalPayments >= totalWithdrawals) {
+      paymentTellers = 1;
+      withdrawalTellers = 0;
+    } else {
+      paymentTellers = 0;
+      withdrawalTellers = 1;
+    }
+    return { paymentTellers, withdrawalTellers };
+  }
+
+  if (paymentTellers === 0 && totalPayments > 0) paymentTellers = 1;
+  if (paymentTellers >= totalTellers) paymentTellers = totalTellers - 1;
+  withdrawalTellers = totalTellers - paymentTellers;
+  if (withdrawalTellers === 0 && totalWithdrawals > 0) {
+    withdrawalTellers = 1;
+    paymentTellers = totalTellers - 1;
+  }
+
+  return { paymentTellers, withdrawalTellers };
+}
+
 function main() {
   try {
     const config = parseArgs(process.argv.slice(2));
@@ -290,8 +322,8 @@ function main() {
     );
     const totalWait = results.aggregated.reduce((sum, teller) => sum + teller.totalWaitTime, 0);
 
-    const avgPaymentsPerTeller = config.tellers === 0 ? 0 : totalPayments / config.tellers;
-    const avgWithdrawalsPerTeller = config.tellers === 0 ? 0 : totalWithdrawals / config.tellers;
+    const avgPaymentsPerTeller = totalPayments / config.tellers;
+    const avgWithdrawalsPerTeller = totalWithdrawals / config.tellers;
     const overallAvgWait = totalCustomers === 0 ? 0 : totalWait / totalCustomers;
 
     let minIndex = 0;
@@ -303,29 +335,11 @@ function main() {
 
     const needsNewTeller = overallAvgWait > config.waitThreshold;
     const totalTellersRecommended = config.tellers + (needsNewTeller ? 1 : 0);
-    const paymentShare = totalCustomers === 0 ? 0.5 : totalPayments / totalCustomers;
-    let paymentTellers = Math.round(totalTellersRecommended * paymentShare);
-    let withdrawalTellers = totalTellersRecommended - paymentTellers;
-
-    if (totalTellersRecommended === 1) {
-      if (totalPayments >= totalWithdrawals) {
-        paymentTellers = 1;
-        withdrawalTellers = 0;
-      } else {
-        paymentTellers = 0;
-        withdrawalTellers = 1;
-      }
-    } else {
-      if (paymentTellers === 0 && totalPayments > 0) paymentTellers = 1;
-      if (paymentTellers >= totalTellersRecommended) {
-        paymentTellers = totalTellersRecommended - 1;
-      }
-      withdrawalTellers = totalTellersRecommended - paymentTellers;
-      if (withdrawalTellers === 0 && totalWithdrawals > 0) {
-        withdrawalTellers = 1;
-        paymentTellers = totalTellersRecommended - 1;
-      }
-    }
+    const { paymentTellers, withdrawalTellers } = recommendExclusiveTellers(
+      totalTellersRecommended,
+      totalPayments,
+      totalWithdrawals
+    );
 
     console.log("Resultados de simulación M/M/1");
     console.log(`Réplicas ejecutadas: ${results.replicationsExecuted}`);
