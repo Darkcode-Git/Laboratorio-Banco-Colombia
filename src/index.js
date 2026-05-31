@@ -26,6 +26,8 @@ const KEY_MAP = {
   seed: "seed",
 };
 
+const Z_SCORE_95_CI = 1.96;
+
 function usage() {
   return `
 Uso:
@@ -139,7 +141,6 @@ function simulateTeller({ hours, arrivalRate, serviceRate, paymentProb, rand }) 
       if (!serverBusy) {
         serverBusy = true;
         nextDeparture = time + serviceTime;
-        stats.totalWaitTime += 0;
         stats.totalServiceTime += serviceTime;
         stats.totalCustomers += 1;
         if (isPayment) stats.paymentCount += 1;
@@ -188,7 +189,7 @@ function computeRequiredReplications(samples, relativeError) {
   if (samples.length < 2 || mean === 0 || sigma === 0) {
     return { required: samples.length, mean, sigma };
   }
-  const z = 1.96;
+  const z = Z_SCORE_95_CI;
   const halfWidthTarget = Math.abs(relativeError * mean);
   const required = Math.ceil((z * sigma / halfWidthTarget) ** 2);
   return { required: Math.max(required, samples.length), mean, sigma };
@@ -304,12 +305,26 @@ function main() {
     const totalTellersRecommended = config.tellers + (needsNewTeller ? 1 : 0);
     const paymentShare = totalCustomers === 0 ? 0.5 : totalPayments / totalCustomers;
     let paymentTellers = Math.round(totalTellersRecommended * paymentShare);
-    if (paymentTellers === 0 && totalPayments > 0) paymentTellers = 1;
-    if (paymentTellers >= totalTellersRecommended) paymentTellers = totalTellersRecommended - 1;
     let withdrawalTellers = totalTellersRecommended - paymentTellers;
-    if (withdrawalTellers === 0 && totalWithdrawals > 0) {
-      withdrawalTellers = 1;
-      paymentTellers = totalTellersRecommended - 1;
+
+    if (totalTellersRecommended === 1) {
+      if (totalPayments >= totalWithdrawals) {
+        paymentTellers = 1;
+        withdrawalTellers = 0;
+      } else {
+        paymentTellers = 0;
+        withdrawalTellers = 1;
+      }
+    } else {
+      if (paymentTellers === 0 && totalPayments > 0) paymentTellers = 1;
+      if (paymentTellers >= totalTellersRecommended) {
+        paymentTellers = totalTellersRecommended - 1;
+      }
+      withdrawalTellers = totalTellersRecommended - paymentTellers;
+      if (withdrawalTellers === 0 && totalWithdrawals > 0) {
+        withdrawalTellers = 1;
+        paymentTellers = totalTellersRecommended - 1;
+      }
     }
 
     console.log("Resultados de simulación M/M/1");
