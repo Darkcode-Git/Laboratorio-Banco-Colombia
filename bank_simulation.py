@@ -1,410 +1,377 @@
-# -*- coding: utf-8 -*-
-from __future__ import annotations
+import simpy
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
 
-from dataclasses import dataclass
-from math import sqrt
-from statistics import mean, stdev
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
-import random
+# ==========================================
+# 1. DEFINICIÓN DE PARÁMETROS Y TABLAS
+# ==========================================
+TIEMPO_SIMULACION = 480  # 8 horas en minutos
+REPLICAS = 500
 
-Action = Literal["retiro", "pago"]
-UserType = Literal["rapido", "normal", "lento", "muy_lento"]
+# Probabilidades principales
+PROB_RETIRO,  PROB_PAGO = 0.70,  0.30
 
-USER_TYPES: Tuple[UserType, ...] = ("rapido", "normal", "lento", "muy_lento")
-ACTIONS: Tuple[Action, ...] = ("retiro", "pago")
-
-ACTION_PROB: Dict[Action, float] = {"retiro": 0.70, "pago": 0.30}
-USER_TYPE_PROB: Dict[Action, Dict[UserType, float]] = {
-    "retiro": {"rapido": 0.23, "normal": 0.40, "lento": 0.17, "muy_lento": 0.20},
-    "pago": {"rapido": 0.10, "normal": 0.20, "lento": 0.30, "muy_lento": 0.40},
-}
-SERVICE_MEAN_MIN: Dict[Action, Dict[UserType, float]] = {
-    "retiro": {"rapido": 1.0, "normal": 2.0, "lento": 3.0, "muy_lento": 4.0},
-    "pago": {"rapido": 3.0, "normal": 3.0, "lento": 5.0, "muy_lento": 7.0},
-}
-ARRIVAL_MEAN_MIN: Dict[Action, Dict[UserType, float]] = {
-    "retiro": {"rapido": 1.0, "normal": 2.0, "lento": 3.0, "muy_lento": 3.0},
-    "pago": {"rapido": 1.0, "normal": 2.0, "lento": 3.0, "muy_lento": 4.0},
-}
-
-
-@dataclass(frozen=True)
-class Scenario:
-    name: str
-    cashier_capabilities: Tuple[Optional[Action], ...]
-
-
-NEW_CASHIER_IMPROVEMENT_THRESHOLD = 0.90
-
-T_CRITICAL_95 = {
-    1: 12.706,
-    2: 4.303,
-    3: 3.182,
-    4: 2.776,
-    5: 2.571,
-    6: 2.447,
-    7: 2.365,
-    8: 2.306,
-    9: 2.262,
-    10: 2.228,
-    11: 2.201,
-    12: 2.179,
-    13: 2.160,
-    14: 2.145,
-    15: 2.131,
-    16: 2.120,
-    17: 2.110,
-    18: 2.101,
-    19: 2.093,
-    20: 2.086,
-    21: 2.080,
-    22: 2.074,
-    23: 2.069,
-    24: 2.064,
-    25: 2.060,
-    26: 2.056,
-    27: 2.052,
-    28: 2.048,
-    29: 2.045,
-    30: 2.042,
+# Tabla 1 y 2 combinadas:  {Acción:  {Tipo:  (Probabilidad,  Media Servicio,  Media Llegada)}}
+datos_usuarios = {
+    'Retiro':  {
+        'Rápido':  (0.23,  1,  1), 
+        'Normal':  (0.40,  2,  2), 
+        'Lento':  (0.17,  3,  3), 
+        'Muy lento':  (0.20,  4,  3)
+    }, 
+    'Pago':  {
+        'Rápido':  (0.10,  3,  1), 
+        'Normal':  (0.20,  3,  2), 
+        'Lento':  (0.30,  5,  3), 
+        'Muy lento':  (0.40,  7,  4)
+    }
 }
 
-SCENARIOS: Tuple[Scenario, ...] = (
-    Scenario(name="3_cajas_mixtas", cashier_capabilities=(None, None, None)),
-    Scenario(name="1_retiro_2_pagos", cashier_capabilities=("retiro", "pago", "pago")),
-    Scenario(name="2_retiros_1_pago", cashier_capabilities=("retiro", "retiro", "pago")),
-    Scenario(name="4_cajas_3_retiros_1_pago", cashier_capabilities=("retiro", "retiro", "retiro", "pago")),
+# ==========================================
+# 2. CLASES Y FUNCIONES MEJORADAS
+# ==========================================
+class BancoSimulacion: 
+    def __init__(self,  env,  num_retiros,  num_pagos): 
+        self.env = env
+        self.cajeros_retiro = [simpy.Resource(env,  capacity=1) for _ in range(num_retiros)]
+        self.cajeros_pago = [simpy.Resource(env,  capacity=1) for _ in range(num_pagos)]
+        self.registro_usuarios = []
+        self.tiempos_cajeros = {f'Retiro_{i}':  [] for i in range(num_retiros)}
+        self.tiempos_cajeros.update({f'Pago_{i}':  [] for i in range(num_pagos)})
+        self.tiempo_acumulado_espera = []
+        self.tiempo_acumulado_servicio = []
+
+    def atencion(self,  usuario,  accion,  tipo_usuario,  tiempo_servicio): 
+        llegada = self.env.now
+
+        if accion == 'Retiro': 
+            cajero_elegido = min(range(len(self.cajeros_retiro)), 
+                               key=lambda i:  len(self.cajeros_retiro[i].queue))
+            cajero = self.cajeros_retiro[cajero_elegido]
+            nombre_cajero = f'Retiro_{cajero_elegido}'
+        else: 
+            cajero_elegido = min(range(len(self.cajeros_pago)), 
+                               key=lambda i:  len(self.cajeros_pago[i].queue))
+            cajero = self.cajeros_pago[cajero_elegido]
+            nombre_cajero = f'Pago_{cajero_elegido}'
+
+        with cajero.request() as req: 
+            yield req
+            espera = self.env.now - llegada
+            t_servicio_real = np.random.exponential(tiempo_servicio)
+            yield self.env.timeout(t_servicio_real)
+
+            tiempo_total = espera + t_servicio_real
+            self.registro_usuarios.append({
+                'Accion':  accion, 
+                'Tipo':  tipo_usuario, 
+                'Espera':  espera, 
+                'Servicio':  t_servicio_real, 
+                'Cajero':  nombre_cajero, 
+                'Tiempo_Total':  tiempo_total
+            })
+            self.tiempos_cajeros[nombre_cajero].append(t_servicio_real)
+
+            if not self.tiempo_acumulado_espera: 
+                self.tiempo_acumulado_espera.append(espera)
+                self.tiempo_acumulado_servicio.append(t_servicio_real)
+            else: 
+                n_espera = len(self.tiempo_acumulado_espera)
+                n_servicio = len(self.tiempo_acumulado_servicio)
+                self.tiempo_acumulado_espera.append(
+                    (self.tiempo_acumulado_espera[-1] * n_espera + espera) / (n_espera + 1)
+                )
+                self.tiempo_acumulado_servicio.append(
+                    (self.tiempo_acumulado_servicio[-1] * n_servicio + t_servicio_real) / (n_servicio + 1)
+                )
+
+def generador_usuarios(env,  banco): 
+    usuario_id = 0
+    while env.now < TIEMPO_SIMULACION: 
+        accion = np.random.choice(['Retiro',  'Pago'],  p=[PROB_RETIRO,  PROB_PAGO])
+        tipos = list(datos_usuarios[accion].keys())
+        probs = [datos_usuarios[accion][t][0] for t in tipos]
+        tipo_usuario = np.random.choice(tipos,  p=probs)
+        media_servicio = datos_usuarios[accion][tipo_usuario][1]
+        media_llegada = datos_usuarios[accion][tipo_usuario][2]
+        t_llegada = np.random.exponential(media_llegada)
+        yield env.timeout(t_llegada)
+        usuario_id += 1
+        env.process(banco.atencion(usuario_id,  accion,  tipo_usuario,  media_servicio))
+
+def calcular_factor_utilizacion(df_modelo): 
+    resultados = []
+    for cajero in df_modelo['Cajero'].unique(): 
+        df_cajero = df_modelo[df_modelo['Cajero'] == cajero]
+        if len(df_cajero) > 0: 
+            total_clientes = len(df_cajero)
+            lambda_rate = total_clientes / TIEMPO_SIMULACION
+            mu_rate = 1 / df_cajero['Servicio'].mean() if df_cajero['Servicio'].mean() > 0 else 0
+            rho = lambda_rate / mu_rate if mu_rate > 0 else float('inf')
+            resultados.append({
+                'Cajero':  cajero, 
+                'Lambda':  lambda_rate, 
+                'Mu':  mu_rate, 
+                'Rho':  rho, 
+                'Estable':  'S' if rho < 1 else 'No'
+            })
+    return pd.DataFrame(resultados)
+
+def calcular_intervalo_confianza(datos,  nivel_confianza=0.95): 
+    if len(datos) < 2: 
+        return np.mean(datos),  0
+    media = np.mean(datos)
+    desv_std = np.std(datos,  ddof=1)
+    n = len(datos)
+    t_critico = stats.t.ppf(1 - (1-nivel_confianza)/2,  df=n-1)
+    margen_error = t_critico * (desv_std / np.sqrt(n))
+    return media,  margen_error
+
+def ejecutar_modelo(num_retiros,  num_pagos,  nombre_modelo): 
+    resultados = []
+    metricas_replicas = []
+    
+    for rep in range(REPLICAS): 
+        env = simpy.Environment()
+        banco = BancoSimulacion(env,  num_retiros,  num_pagos)
+        env.process(generador_usuarios(env,  banco))
+        env.run(until=TIEMPO_SIMULACION)
+        df = pd.DataFrame(banco.registro_usuarios)
+        df['Replica'] = rep + 1
+        df['Modelo'] = nombre_modelo
+        resultados.append(df)
+        
+        if len(df) > 0: 
+            metricas_replicas.append({
+                'Replica':  rep + 1, 
+                'Modelo':  nombre_modelo, 
+                'Espera_Promedio':  df['Espera'].mean(), 
+                'Servicio_Promedio':  df['Servicio'].mean(), 
+                'Tiempo_Total_Promedio':  df['Tiempo_Total'].mean(), 
+                'Clientes_Atendidos':  len(df)
+            })
+
+    return pd.concat(resultados,  ignore_index=True),  pd.DataFrame(metricas_replicas)
+
+# ==========================================
+# 3. EJECUCIÓN DE LOS ESCENARIOS
+# ==========================================
+print("Ejecutando simulaciones...")
+df_modelo_a,  metricas_a = ejecutar_modelo(2,  1,  "Modelo A (2 Retiros,  1 Pago)")
+df_modelo_b,  metricas_b = ejecutar_modelo(1,  2,  "Modelo B (1 Retiro,  2 Pago)")
+df_total = pd.concat([df_modelo_a,  df_modelo_b],  ignore_index=True)
+metricas_total = pd.concat([metricas_a,  metricas_b],  ignore_index=True)
+
+# ==========================================
+# 4. VALIDACIÓN DE ESTABILIDAD ( < 1)
+# ==========================================
+print("\n--- VALIDACIÓN DE ESTABILIDAD DEL SISTEMA ---")
+rho_a = calcular_factor_utilizacion(df_modelo_a)
+rho_b = calcular_factor_utilizacion(df_modelo_b)
+
+print("\nFactores de utilización Modelo A:  ")
+print(rho_a.to_string(index=False))
+
+print("\nFactores de utilización Modelo B:  ")
+print(rho_b.to_string(index=False))
+
+# ==========================================
+# 5. CÁLCULO DE ESTADÍSTICAS Y SOLUCIONES
+# ==========================================
+print("\n--- RESULTADOS DEL ANÁLISIS ---")
+
+atencion_cajeros = df_total.groupby(['Modelo',  'Cajero'])['Servicio'].mean().reset_index()
+print("\n1. Tiempo promedio de atención (servicio) por cajero:  ")
+print(atencion_cajeros.to_string(index=False))
+
+usuarios_tipo_total = df_total.groupby(['Modelo',  'Accion',  'Tipo',  'Replica']).size().reset_index(name='Cantidad')
+promedio_usuarios_tipo = usuarios_tipo_total.groupby(['Modelo',  'Accion',  'Tipo'])['Cantidad'].mean().reset_index(name='Promedio por día')
+print("\n2. Promedio de usuarios de cada tipo (por día):  ")
+print(promedio_usuarios_tipo.to_string(index=False))
+
+print("\n3. Resumen de cantidades de usuarios (promedios diarios por modelo):  ")
+total_por_modelo = usuarios_tipo_total.groupby(['Modelo',  'Replica'])['Cantidad'].sum().reset_index()
+media_total_modelo = total_por_modelo.groupby('Modelo')['Cantidad'].mean()
+print(media_total_modelo)
+
+esperas = df_total.groupby(['Modelo',  'Accion'])['Espera'].mean().reset_index()
+print("\n4 y 5. Tiempos promedio de ESPERA en fila (minutos):  ")
+print(esperas.to_string(index=False))
+
+# ==========================================
+# 6. CÁLCULO DE INTERVALOS DE CONFIANZA
+# ==========================================
+print("\n--- INTERVALOS DE CONFIANZA (95%) ---")
+
+ic_esperas = df_total.groupby(['Modelo',  'Accion'])['Espera'].apply(
+    lambda x:  calcular_intervalo_confianza(x)
+).reset_index()
+ic_esperas[['Espera_Media',  'Margen_Error']] = pd.DataFrame(
+    ic_esperas['Espera'].tolist(),  columns=['Espera_Media',  'Margen_Error']
+)
+ic_esperas = ic_esperas.drop('Espera',  axis=1)
+
+print("\nIntervalos de confianza para tiempos de espera:  ")
+for _,  row in ic_esperas.iterrows(): 
+    print(f"{row['Modelo']} - {row['Accion']}:  {row['Espera_Media']: .2f}  ± {row['Margen_Error']: .2f} minutos")
+
+# ==========================================
+# 7. MÉTRICAS ADICIONALES
+# ==========================================
+print("\n--- MÉTRICAS ADICIONALES ---")
+
+metricas_sistema = df_total.groupby(['Modelo',  'Accion']).agg({
+    'Espera':  ['mean',  'count'], 
+    'Servicio':  'mean'
+}).reset_index()
+
+metricas_sistema.columns = ['Modelo',  'Accion',  'Wq_Promedio',  'Clientes',  'Ts_Promedio']
+metricas_sistema['Lq_Promedio'] = metricas_sistema['Wq_Promedio'] * (
+    metricas_sistema['Clientes'] / TIEMPO_SIMULACION
 )
 
+print("\nMétricas de desempeño del sistema:  ")
+print(metricas_sistema[['Modelo',  'Accion',  'Wq_Promedio',  'Lq_Promedio',  'Ts_Promedio']].to_string(index=False))
 
-def _validate_probabilities() -> None:
-    if abs(sum(ACTION_PROB.values()) - 1.0) > 1e-9:
-        raise ValueError("La probabilidad de acciones debe sumar 1.0")
-    for action in ACTIONS:
-        if abs(sum(USER_TYPE_PROB[action].values()) - 1.0) > 1e-9:
-            raise ValueError(f"Las probabilidades de tipos para {action} deben sumar 1.0")
+# ==========================================
+# 8. VISUALIZACIÓN DE CONVERGENCIA
+# ==========================================
+print("\n--- VISUALIZACIÓN DE CONVERGENCIA ---")
 
+plt.figure(figsize=(15,  10))
 
-def _weighted_mean(values: Dict[UserType, float], probs: Dict[UserType, float]) -> float:
-    return sum(values[user_type] * probs[user_type] for user_type in USER_TYPES)
+plt.subplot(2,  3,  1)
+env_temp = simpy.Environment()
+banco_temp = BancoSimulacion(env_temp,  2,  1)
+env_temp.process(generador_usuarios(env_temp,  banco_temp))
+env_temp.run(until=TIEMPO_SIMULACION)
+if banco_temp.tiempo_acumulado_espera: 
+    plt.plot(banco_temp.tiempo_acumulado_espera,  label='Modelo A',  alpha=0.7)
 
+env_temp = simpy.Environment()
+banco_temp = BancoSimulacion(env_temp,  1,  2)
+env_temp.process(generador_usuarios(env_temp,  banco_temp))
+env_temp.run(until=TIEMPO_SIMULACION)
+if banco_temp.tiempo_acumulado_espera: 
+    plt.plot(banco_temp.tiempo_acumulado_espera,  label='Modelo B',  alpha=0.7)
 
-def _joint_prob(action: Action, user_type: UserType) -> float:
-    return ACTION_PROB[action] * USER_TYPE_PROB[action][user_type]
+plt.title('Convergencia del Tiempo Promedio de Espera')
+plt.xlabel('Número de Clientes')
+plt.ylabel('Tiempo Promedio de Espera (min)')
+plt.legend()
+plt.grid(True,  alpha=0.3)
 
+plt.subplot(2,  3,  2)
+sns.barplot(x='Accion',  y='Espera',  hue='Modelo',  data=df_total,  errorbar=None,  palette="muted")
+plt.title('Tiempo de Espera Promedio por Acción y Modelo')
+plt.ylabel('Minutos de Espera')
+plt.xlabel('Tipo de Acción')
+plt.xticks(rotation=45)
 
-def _theoretical_total_arrival_rate() -> float:
-    expected_interarrival = sum(
-        _joint_prob(action, user_type) * ARRIVAL_MEAN_MIN[action][user_type]
-        for action in ACTIONS
-        for user_type in USER_TYPES
-    )
-    return 1.0 / expected_interarrival
+plt.subplot(2,  3,  3)
+sns.boxplot(x='Cajero',  y='Servicio',  hue='Modelo',  data=df_total,  palette="Set2")
+plt.title('Distribución de los Tiempos de Atención por Cajero')
+plt.ylabel('Minutos de Servicio')
+plt.xlabel('Cajero')
+plt.xticks(rotation=45)
 
+plt.subplot(2,  3,  4)
+for modelo in df_total['Modelo'].unique(): 
+    datos_modelo = df_total[df_total['Modelo'] == modelo]['Espera']
+    plt.hist(datos_modelo,  alpha=0.7,  label=modelo,  bins=50)
+plt.title('Distribución de Tiempos de Espera')
+plt.xlabel('Tiempo de Espera (min)')
+plt.ylabel('Frecuencia')
+plt.legend()
 
-def _action_service_rate(action: Action) -> float:
-    expected_service = _weighted_mean(SERVICE_MEAN_MIN[action], USER_TYPE_PROB[action])
-    return 1.0 / expected_service
+plt.subplot(2,  3,  5)
+metricas_resumen = df_total.groupby('Modelo').agg({
+    'Espera':  'mean', 
+    'Servicio':  'mean', 
+    'Tiempo_Total':  'mean'
+}).reset_index()
 
+x = np.arange(len(metricas_resumen['Modelo']))
+width = 0.25
 
-def validate_scenario_stability(scenario: Scenario) -> Dict[str, float]:
-    total_lambda = _theoretical_total_arrival_rate()
-    lambda_by_action = {action: total_lambda * ACTION_PROB[action] for action in ACTIONS}
-    mu_by_action = {action: _action_service_rate(action) for action in ACTIONS}
+plt.bar(x - width,  metricas_resumen['Espera'],  width,  label='Espera')
+plt.bar(x,  metricas_resumen['Servicio'],  width,  label='Servicio')
+plt.bar(x + width,  metricas_resumen['Tiempo_Total'],  width,  label='Tiempo Total')
 
-    rho_by_cashier: Dict[str, float] = {}
-    mixed_cashiers = sum(1 for capability in scenario.cashier_capabilities if capability is None)
-    specialized_counts = {
-        action: sum(1 for capability in scenario.cashier_capabilities if capability == action) for action in ACTIONS
-    }
+plt.xlabel('Modelo')
+plt.ylabel('Tiempo (min)')
+plt.title('Comparación de Métricas por Modelo')
+plt.xticks(x,  metricas_resumen['Modelo'],  rotation=45)
+plt.legend()
 
-    if mixed_cashiers:
-        arrival_per_mixed = total_lambda / mixed_cashiers
-        overall_service_mean = sum(
-            _joint_prob(action, user_type) * SERVICE_MEAN_MIN[action][user_type]
-            for action in ACTIONS
-            for user_type in USER_TYPES
-        )
-        mu_mixed = 1.0 / overall_service_mean
-        for i in range(mixed_cashiers):
-            rho = arrival_per_mixed / mu_mixed
-            rho_by_cashier[f"cajero_{i + 1}"] = rho
-            if rho >= 1.0:
-                raise ValueError(f"Escenario inestable {scenario.name}: rho={rho:.4f}")
+plt.subplot(2,  3,  6)
+utilizacion_data = []
+for cajero in df_total['Cajero'].unique(): 
+    df_cajero = df_total[df_total['Cajero'] == cajero]
+    if len(df_cajero) > 0: 
+        tiempo_ocupado = df_cajero['Servicio'].sum()
+        utilizacion = (tiempo_ocupado / TIEMPO_SIMULACION) * 100
+        utilizacion_data.append({'Cajero':  cajero,  'Utilizacion':  utilizacion})
 
-    start_idx = mixed_cashiers + 1
-    for action in ACTIONS:
-        count = specialized_counts[action]
-        if count == 0:
-            continue
-        arrival_per_cashier = lambda_by_action[action] / count
-        rho = arrival_per_cashier / mu_by_action[action]
-        for i in range(count):
-            rho_by_cashier[f"cajero_{start_idx}"] = rho
-            start_idx += 1
-            if rho >= 1.0:
-                raise ValueError(f"Escenario inestable {scenario.name}: rho={rho:.4f}")
-    return rho_by_cashier
+if utilizacion_data: 
+    df_util = pd.DataFrame(utilizacion_data)
+    sns.barplot(x='Cajero',  y='Utilizacion',  data=df_util,  palette="viridis")
+    plt.title('Utilización de Cajeros (%)')
+    plt.ylabel('Porcentaje de Utilización')
+    plt.xlabel('Cajero')
+    plt.xticks(rotation=45)
 
+plt.tight_layout()
+plt.show()
 
-def _sample_action(rng: random.Random) -> Action:
-    u = rng.random()
-    return "retiro" if u < ACTION_PROB["retiro"] else "pago"
+# ==========================================
+# 9. RECOMENDACIONES FINALES
+# ==========================================
+print("\n--- RECOMENDACIONES FINALES ---")
 
+print("\nAnálisis de Carga:  ")
+print(f"- Retiros representan el {PROB_RETIRO*100: .0f}% de la carga (volumen alto,  servicio rápido)")
+print(f"- Pagos representan el {PROB_PAGO*100: .0f}% de la carga (volumen bajo,  servicio lento)")
 
-def _sample_user_type(rng: random.Random, action: Action) -> UserType:
-    u = rng.random()
-    cumulative = 0.0
-    for user_type in USER_TYPES:
-        cumulative += USER_TYPE_PROB[action][user_type]
-        if u <= cumulative:
-            return user_type
-    return USER_TYPES[-1]
+mejor_modelo_retiro = esperas[esperas['Accion'] == 'Retiro'].loc[esperas[esperas['Accion'] == 'Retiro']['Espera'].idxmin()]
+mejor_modelo_pago = esperas[esperas['Accion'] == 'Pago'].loc[esperas[esperas['Accion'] == 'Pago']['Espera'].idxmin()]
 
+print(f"\nRecomendación de configuración óptima:  ")
+print(f"- Para minimizar espera en retiros:  {mejor_modelo_retiro['Modelo']}")
+print(f"- Para minimizar espera en pagos:  {mejor_modelo_pago['Modelo']}")
 
-@dataclass
-class CashierStats:
-    customers: int = 0
-    total_wait: float = 0.0
-    total_service: float = 0.0
-    total_system: float = 0.0
+sistemas_inestables = pd.concat([rho_a,  rho_b])
+if any(sistemas_inestables['Rho'] >= 1): 
+    print("\n ADVERTENCIA:  Se detectaron sistemas inestables (ρ ≥ 1)")
+    inestables = sistemas_inestables[sistemas_inestables['Rho'] >= 1]
+    for _,  row in inestables.iterrows(): 
+        print(f"  - Cajero {row['Cajero']}:  ρ = {row['Rho']: .2f} (Inestable)")
+else: 
+    print("\n Todos los sistemas son estables (ρ < 1)")
 
+# ==========================================
+# 10. EXPORTACIÓN DE RESULTADOS
+# ==========================================
+print("\n--- EXPORTACIÓN DE RESULTADOS ---")
 
-@dataclass
-class ReplicaResult:
-    scenario_name: str
-    cashier_metrics: Dict[str, Dict[str, float]]
-    type_counts: Dict[UserType, int]
-    action_counts: Dict[Action, int]
-    total_customers: int
-    average_wait: float
+df_total.to_csv('resultados_simulacion_completa.csv',  index=False)
+metricas_total.to_csv('metricas_replicas.csv',  index=False)
 
+resumen_estadistico = {
+    'Metrica':  ['Tiempo Espera Promedio',  'Tiempo Servicio Promedio',  'Clientes Promedio por Dia'], 
+    'Valor':  [
+        df_total['Espera'].mean(), 
+        df_total['Servicio'].mean(), 
+        df_total.groupby('Replica').size().mean()
+    ]
+}
+pd.DataFrame(resumen_estadistico).to_csv('resumen_estadistico.csv',  index=False)
 
-def _allowed_cashiers(capabilities: Tuple[Optional[Action], ...], action: Action) -> List[int]:
-    return [i for i, capability in enumerate(capabilities) if capability in (None, action)]
+print("Resultados exportados:  ")
+print("- resultados_simulacion_completa.csv")
+print("- metricas_replicas.csv")
+print("- resumen_estadistico.csv")
 
-
-def simulate_replica(
-    scenario: Scenario,
-    horizon_minutes: float,
-    seed: int,
-) -> ReplicaResult:
-    rng = random.Random(seed)
-    available_at = [0.0 for _ in scenario.cashier_capabilities]
-    cashier_stats = [CashierStats() for _ in scenario.cashier_capabilities]
-
-    t = 0.0
-    type_counts: Dict[UserType, int] = {user_type: 0 for user_type in USER_TYPES}
-    action_counts: Dict[Action, int] = {action: 0 for action in ACTIONS}
-
-    while True:
-        action = _sample_action(rng)
-        user_type = _sample_user_type(rng, action)
-        interarrival = rng.expovariate(1.0 / ARRIVAL_MEAN_MIN[action][user_type])
-        t += interarrival
-        if t > horizon_minutes:
-            break
-
-        service_time = rng.expovariate(1.0 / SERVICE_MEAN_MIN[action][user_type])
-
-        candidates = _allowed_cashiers(scenario.cashier_capabilities, action)
-        cashier_index = min(candidates, key=lambda idx: available_at[idx])
-
-        wait = max(0.0, available_at[cashier_index] - t)
-        start_service = t + wait
-        departure_time = start_service + service_time
-        available_at[cashier_index] = departure_time
-
-        stats = cashier_stats[cashier_index]
-        stats.customers += 1
-        stats.total_wait += wait
-        stats.total_service += service_time
-        stats.total_system += wait + service_time
-
-        type_counts[user_type] += 1
-        action_counts[action] += 1
-
-    cashier_metrics: Dict[str, Dict[str, float]] = {}
-    total_customers = 0
-    total_wait = 0.0
-
-    for idx, stats in enumerate(cashier_stats, start=1):
-        if stats.customers:
-            avg_wait = stats.total_wait / stats.customers
-            avg_service = stats.total_service / stats.customers
-            avg_system = stats.total_system / stats.customers
-            lambda_hat = stats.customers / horizon_minutes
-            # El servicio puede terminar después del horizonte de llegadas, por eso se acota a 1.0.
-            utilization_raw = stats.total_service / horizon_minutes
-            utilization = min(utilization_raw, 1.0)
-            l = lambda_hat * avg_system
-            lq = lambda_hat * avg_wait
-        else:
-            avg_wait = avg_service = avg_system = lambda_hat = utilization = l = lq = 0.0
-
-        cashier_metrics[f"cajero_{idx}"] = {
-            "clientes": stats.customers,
-            "tiempo_promedio_espera": avg_wait,
-            "tiempo_promedio_servicio": avg_service,
-            "tiempo_promedio_sistema": avg_system,
-            "lambda": lambda_hat,
-            "utilizacion": utilization,
-            "L": l,
-            "Lq": lq,
-            "Wq": avg_wait,
-            "W": avg_system,
-        }
-        total_customers += stats.customers
-        total_wait += stats.total_wait
-
-    average_wait = (total_wait / total_customers) if total_customers else 0.0
-    return ReplicaResult(
-        scenario_name=scenario.name,
-        cashier_metrics=cashier_metrics,
-        type_counts=type_counts,
-        action_counts=action_counts,
-        total_customers=total_customers,
-        average_wait=average_wait,
-    )
-
-
-def confidence_interval_95(values: Iterable[float]) -> Tuple[float, float]:
-    values_list = list(values)
-    if not values_list:
-        return (0.0, 0.0)
-    if len(values_list) == 1:
-        return (values_list[0], values_list[0])
-    m = mean(values_list)
-    degrees_freedom = len(values_list) - 1
-    # Para n grandes (gl > 30), t converge al valor z≈1.96 en un IC bilateral del 95%.
-    critical_value = T_CRITICAL_95.get(degrees_freedom, 1.96)
-    margin = critical_value * stdev(values_list) / sqrt(len(values_list))
-    return (m - margin, m + margin)
-
-
-def _aggregate_cashier_service_means(replica_results: List[ReplicaResult]) -> Dict[str, float]:
-    all_cashiers = replica_results[0].cashier_metrics.keys()
-    return {
-        cashier: mean(result.cashier_metrics[cashier]["tiempo_promedio_servicio"] for result in replica_results)
-        for cashier in all_cashiers
-    }
-
-
-def _aggregate_type_average(replica_results: List[ReplicaResult]) -> Dict[UserType, float]:
-    return {
-        user_type: mean(result.type_counts[user_type] for result in replica_results) for user_type in USER_TYPES
-    }
-
-
-def _replica_min_by_type(replica_results: List[ReplicaResult]) -> Dict[UserType, Dict[str, int]]:
-    min_data: Dict[UserType, Dict[str, int]] = {}
-    for user_type in USER_TYPES:
-        min_replica_index, min_result = min(
-            enumerate(replica_results, start=1), key=lambda item: item[1].type_counts[user_type]
-        )
-        min_data[user_type] = {"replica": min_replica_index, "usuarios": min_result.type_counts[user_type]}
-    return min_data
-
-
-def run_experiment(replicas: int = 600, horizon_minutes: float = 480.0, base_seed: int = 42) -> Dict[str, object]:
-    _validate_probabilities()
-
-    scenario_outputs: Dict[str, Dict[str, object]] = {}
-    for scenario_index, scenario in enumerate(SCENARIOS):
-        rho = validate_scenario_stability(scenario)
-        results = [
-            simulate_replica(
-                scenario=scenario,
-                horizon_minutes=horizon_minutes,
-                seed=base_seed + scenario_index * 10_000 + replica_index,
-            )
-            for replica_index in range(replicas)
-        ]
-
-        avg_waits = [result.average_wait for result in results]
-        avg_wait_ci = confidence_interval_95(avg_waits)
-
-        service_by_cashier = _aggregate_cashier_service_means(results)
-        quickest_service_cashier = min(service_by_cashier, key=service_by_cashier.get)
-        slowest_service_cashier = max(service_by_cashier, key=service_by_cashier.get)
-
-        scenario_outputs[scenario.name] = {
-            "rho_por_cajero": rho,
-            "punto_1_cajeros": {
-                "tiempo_promedio_servicio_por_cajero": service_by_cashier,
-                "cajero_menor_tiempo": quickest_service_cashier,
-                "cajero_mayor_tiempo": slowest_service_cashier,
-            },
-            "punto_2_promedio_usuarios_por_tipo": _aggregate_type_average(results),
-            "punto_3_total_usuarios_por_tipo_por_replica": [result.type_counts for result in results],
-            "punto_3_replica_menor_por_tipo": _replica_min_by_type(results),
-            "metricas_globales": {
-                "espera_promedio": mean(avg_waits),
-                "ic95_espera_promedio": avg_wait_ci,
-                "total_clientes_promedio": mean(result.total_customers for result in results),
-                "utilizacion_promedio": mean(
-                    mean(c["utilizacion"] for c in result.cashier_metrics.values()) for result in results
-                ),
-            },
-        }
-
-    wait_3_cashiers = min(
-        scenario_outputs[name]["metricas_globales"]["espera_promedio"]
-        for name in ["3_cajas_mixtas", "1_retiro_2_pagos", "2_retiros_1_pago"]
-    )
-    wait_4_cashiers = scenario_outputs["4_cajas_3_retiros_1_pago"]["metricas_globales"]["espera_promedio"]
-    needs_new_cashier = wait_4_cashiers < (wait_3_cashiers * NEW_CASHIER_IMPROVEMENT_THRESHOLD)
-
-    optimal_scenario = min(
-        scenario_outputs,
-        key=lambda name: scenario_outputs[name]["metricas_globales"]["espera_promedio"],
-    )
-
-    return {
-        "configuracion_optima": optimal_scenario,
-        "necesita_nuevo_cajero": needs_new_cashier,
-        "escenarios": scenario_outputs,
-        "parametros": {
-            "replicas": replicas,
-            "horizonte_minutos": horizon_minutes,
-            "semilla_base": base_seed,
-        },
-    }
-
-
-def _plot_wait_comparison(results: Dict[str, object]) -> None:
-    try:
-        import matplotlib.pyplot as plt  # type: ignore
-    except ImportError:
-        return
-
-    escenarios = list(results["escenarios"].keys())
-    esperas = [results["escenarios"][name]["metricas_globales"]["espera_promedio"] for name in escenarios]
-
-    fig, ax = plt.subplots(figsize=(10, 4))
-    x_positions = list(range(len(escenarios)))
-    ax.bar(x_positions, esperas)
-    ax.set_title("Comparación de espera promedio por escenario")
-    ax.set_ylabel("Minutos")
-    ax.set_xticks(x_positions)
-    ax.set_xticklabels(escenarios, rotation=20, ha="right")
-    fig.tight_layout()
-    plt.savefig("comparacion_esperas.png", dpi=150)
-
-
-def main() -> None:
-    results = run_experiment()
-    print("=== Resumen del laboratorio bancario ===")
-    print(f"Configuración óptima: {results['configuracion_optima']}")
-    print(f"¿Se recomienda nuevo cajero?: {results['necesita_nuevo_cajero']}")
-    for scenario_name, data in results["escenarios"].items():
-        metricas = data["metricas_globales"]
-        print(
-            f"- {scenario_name}: espera promedio={metricas['espera_promedio']:.4f} min "
-            f"IC95={metricas['ic95_espera_promedio']}"
-        )
-    _plot_wait_comparison(results)
-
-
-if __name__ == "__main__":
-    main()
